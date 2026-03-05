@@ -14,10 +14,11 @@ const currentSchemaVersion = 1
 
 // Host represents a single SSH host in a project.
 type Host struct {
-	Name     string `json:"name"`               // alias from ~/.ssh/config
-	Hostname string `json:"hostname"`            // resolved IP/FQDN — used for soft match
-	User     string `json:"user,omitempty"`
-	Port     int    `json:"port,omitempty"`
+	Name          string   `json:"name"`                     // alias from ~/.ssh/config
+	Hostname      string   `json:"hostname"`                 // resolved IP/FQDN — used for soft match
+	User          string   `json:"user,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	IdentityFiles []string `json:"identity_files,omitempty"` // from IdentityFile in ~/.ssh/config
 }
 
 // Project is a named collection of hosts and a shared log path.
@@ -37,9 +38,14 @@ type Config struct {
 }
 
 func configPath() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("get user config dir: %w", err)
+	// Honour XDG_CONFIG_HOME explicitly so tests (and Linux) can redirect writes.
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		var err error
+		base, err = os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("get user config dir: %w", err)
+		}
 	}
 	return filepath.Join(base, "logviewer", "projects.json"), nil
 }

@@ -10,10 +10,11 @@ import (
 
 // SSHEntry is a parsed entry from ~/.ssh/config.
 type SSHEntry struct {
-	Alias    string
-	Hostname string
-	User     string
-	Port     int
+	Alias         string
+	Hostname      string
+	User          string
+	Port          int
+	IdentityFiles []string
 }
 
 // ParseSSHConfig reads ~/.ssh/config and returns all non-wildcard host entries.
@@ -59,15 +60,32 @@ func ParseSSHConfig() ([]SSHEntry, error) {
 					port = p
 				}
 			}
+			var identityFiles []string
+			for _, idFile := range gosshconfig.GetAll(alias, "IdentityFile") {
+				if idFile != "" {
+					identityFiles = append(identityFiles, expandHome(idFile))
+				}
+			}
 			entries = append(entries, SSHEntry{
-				Alias:    alias,
-				Hostname: hostname,
-				User:     user,
-				Port:     port,
+				Alias:         alias,
+				Hostname:      hostname,
+				User:          user,
+				Port:          port,
+				IdentityFiles: identityFiles,
 			})
 		}
 	}
 	return entries, nil
+}
+
+func expandHome(path string) string {
+	if len(path) >= 2 && path[:2] == "~/" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return home + path[1:]
+		}
+	}
+	return path
 }
 
 // HostValidationResult holds the outcome of validating a single project host.
