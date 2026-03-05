@@ -140,6 +140,9 @@ var reconnectDelays = []time.Duration{
 }
 
 func reconnectDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
 	if attempt < len(reconnectDelays) {
 		return reconnectDelays[attempt]
 	}
