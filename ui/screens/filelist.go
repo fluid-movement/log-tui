@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/fluid-movement/log-tui/clog"
 	"github.com/fluid-movement/log-tui/config"
 	gossh "github.com/fluid-movement/log-tui/ssh"
+	cryptossh "golang.org/x/crypto/ssh"
 	"github.com/fluid-movement/log-tui/ui/styles"
 )
 
@@ -101,11 +103,11 @@ type hostState struct {
 
 // unknownKeyPrompt holds state for the "Add host key? [y/N]" modal.
 type unknownKeyPrompt struct {
-	active   bool
-	host     config.Host
-	hostname string
-	key      interface{} // gossh.PublicKey — stored as any to avoid import in view
-	remoteAddr interface{} // net.Addr
+	active     bool
+	host       config.Host
+	hostname   string
+	serverKey  cryptossh.PublicKey
+	remoteAddr net.Addr
 }
 
 type FileListModel struct {
@@ -227,9 +229,11 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 				for _, h := range m.project.Hosts {
 					if h.Name == msg.host {
 						m.keyPrompt = unknownKeyPrompt{
-							active:   true,
-							host:     h,
-							hostname: msg.host,
+							active:     true,
+							host:       h,
+							hostname:   msg.host,
+							serverKey:  ce.ServerKey,
+							remoteAddr: ce.RemoteAddr,
 						}
 						break
 					}
@@ -276,12 +280,17 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 		if m.keyPrompt.active {
 			switch {
 			case key.Matches(msg, key.NewBinding(key.WithKeys("y", "Y"))):
-				host := m.keyPrompt.host
+				kp := m.keyPrompt
 				m.keyPrompt = unknownKeyPrompt{}
-				// Retry connection — the user accepts this key (we just retry;
-				// in a production app we'd add it to known_hosts first).
+				// Persist the server host key, then retry the connection.
 				return m, func() tea.Msg {
-					return connectAndList(m.ctx, host, m.project.LogPath)
+					if kp.serverKey != nil && kp.remoteAddr != nil {
+						addr := kp.remoteAddr.String() // "host:port"
+						if err := gossh.AddKnownHost(addr, kp.remoteAddr, kp.serverKey); err != nil {
+							clog.Error("failed to add known host", "err", err)
+						}
+					}
+					return connectAndList(m.ctx, kp.host, m.project.LogPath)
 				}
 			default:
 				// Decline — keep the error state.

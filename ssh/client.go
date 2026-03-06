@@ -33,6 +33,10 @@ type ConnectError struct {
 	Reason    ConnectFailReason
 	Err       error
 	ExtraInfo string // e.g. "Run: ssh-add ~/.ssh/your_key" or known_hosts location
+	// ServerKey and RemoteAddr are set for FailHostKeyUnknown so the caller
+	// can persist the key via AddKnownHost after the user confirms.
+	ServerKey  gossh.PublicKey
+	RemoteAddr net.Addr
 }
 
 func (e *ConnectError) Error() string {
@@ -106,11 +110,14 @@ func Connect(ctx context.Context, host config.Host) (*Client, error) {
 			}
 			if errors.As(err, &unknownHostErr) {
 				if len(unknownHostErr.Want) == 0 {
-					// Host truly unknown
+					// Host truly unknown — store the key and addr so the UI can
+					// call AddKnownHost after the user confirms.
 					return &ConnectError{
-						Host:   host,
-						Reason: FailHostKeyUnknown,
-						Err:    fmt.Errorf("unknown host key for %s", hostname),
+						Host:       host,
+						Reason:     FailHostKeyUnknown,
+						Err:        fmt.Errorf("unknown host key for %s", hostname),
+						ServerKey:  key,
+						RemoteAddr: remote,
 					}
 				}
 				// Key changed

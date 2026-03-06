@@ -47,12 +47,12 @@ func ParseSSHConfig() ([]SSHEntry, error) {
 			if alias == "*" {
 				continue
 			}
-			hostname := gosshconfig.Get(alias, "Hostname")
+			hostname, _ := cfg.Get(alias, "Hostname")
 			if hostname == "" {
 				hostname = alias
 			}
-			user := gosshconfig.Get(alias, "User")
-			portStr := gosshconfig.Get(alias, "Port")
+			user, _ := cfg.Get(alias, "User")
+			portStr, _ := cfg.Get(alias, "Port")
 			port := 22
 			if portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil {
