@@ -11,6 +11,7 @@ import (
 
 	"github.com/fluid-movement/log-tui/clog"
 	"github.com/fluid-movement/log-tui/config"
+	gosshconfig "github.com/kevinburke/ssh_config"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -78,6 +79,9 @@ func (c *Client) SSHClient() *gossh.Client {
 	return c.conn
 }
 
+// knownHostsPathOverride is used in tests to point to a temp known_hosts file.
+var knownHostsPathOverride string
+
 // Connect establishes an SSH connection to host using ssh-agent then identity files.
 func Connect(ctx context.Context, host config.Host) (*Client, error) {
 	authMethods, err := buildAuthMethods(host)
@@ -87,6 +91,9 @@ func Connect(ctx context.Context, host config.Host) (*Client, error) {
 
 	home, _ := os.UserHomeDir()
 	khPath := filepath.Join(home, ".ssh", "known_hosts")
+	if knownHostsPathOverride != "" {
+		khPath = knownHostsPathOverride
+	}
 
 	hostKeyCallback, err := knownhosts.New(khPath)
 	var unknownHostErr *knownhosts.KeyError
@@ -134,6 +141,7 @@ func Connect(ctx context.Context, host config.Host) (*Client, error) {
 	}
 
 	addr := fmt.Sprintf("%s:%d", host.Hostname, port(host))
+	clog.Debug("dialing", "host", host.Name, "addr", addr, "user", cfg.User)
 
 	connCtx, cancel := context.WithCancel(ctx)
 	_ = connCtx
@@ -184,42 +192,73 @@ func containsStr(s, sub string) bool {
 	return false
 }
 
-// buildAuthMethods returns auth methods: ssh-agent first, then identity files.
+// buildAuthMethods returns a single publickey AuthMethod with all available signers.
+// Agent signers and file signers are combined into one PublicKeys call so the
+// golang SSH client tries them all before giving up — using two separate AuthMethods
+// causes it to stop after the first method fails without falling through to the second.
 func buildAuthMethods(host config.Host) ([]gossh.AuthMethod, error) {
-	var methods []gossh.AuthMethod
+	var signers []gossh.Signer
 
-	// 1. ssh-agent via SSH_AUTH_SOCK
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+	// 1. SSH agent keys.
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	clog.Debug("ssh-agent", "host", host.Name, "SSH_AUTH_SOCK", sock)
+	if sock != "" {
 		conn, err := net.Dial("unix", sock)
-		if err == nil {
+		if err != nil {
+			clog.Debug("ssh-agent dial failed", "host", host.Name, "err", err)
+		} else {
 			agentClient := agent.NewClient(conn)
-			methods = append(methods, gossh.PublicKeysCallback(agentClient.Signers))
+			agentSigners, err := agentClient.Signers()
+			for _, s := range agentSigners {
+				clog.Debug("ssh-agent key", "host", host.Name, "type", s.PublicKey().Type(), "fingerprint", gossh.FingerprintSHA256(s.PublicKey()))
+			}
+			clog.Debug("ssh-agent signers", "host", host.Name, "count", len(agentSigners), "err", err)
+			signers = append(signers, agentSigners...)
 		}
 	}
 
-	// 2. Identity files from ~/.ssh/config or defaults
+	// 2. Identity files: stored → live ssh_config → well-known defaults.
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return methods, nil
+		if len(signers) == 0 {
+			return nil, fmt.Errorf("no auth methods available for host %s", host.Name)
+		}
+		return []gossh.AuthMethod{gossh.PublicKeys(signers...)}, nil
 	}
-	defaults := []string{
-		filepath.Join(home, ".ssh", "id_ed25519"),
-		filepath.Join(home, ".ssh", "id_rsa"),
-		filepath.Join(home, ".ssh", "id_ecdsa"),
+	keyPaths := host.IdentityFiles
+	clog.Debug("stored IdentityFiles", "host", host.Name, "paths", keyPaths)
+	if len(keyPaths) == 0 {
+		rawPaths := gosshconfig.GetAll(host.Name, "IdentityFile")
+		clog.Debug("ssh_config IdentityFile", "host", host.Name, "paths", rawPaths)
+		for _, p := range rawPaths {
+			if p != "" {
+				keyPaths = append(keyPaths, expandSSHPath(p, home))
+			}
+		}
 	}
-	for _, keyPath := range defaults {
+	if len(keyPaths) == 0 {
+		keyPaths = []string{
+			filepath.Join(home, ".ssh", "id_ed25519"),
+			filepath.Join(home, ".ssh", "id_rsa"),
+			filepath.Join(home, ".ssh", "id_ecdsa"),
+		}
+		clog.Debug("falling back to default key paths", "host", host.Name, "paths", keyPaths)
+	}
+	for _, keyPath := range keyPaths {
 		signer, err := loadKey(keyPath, host)
 		if err != nil {
 			clog.Debug("skipping key", "path", keyPath, "err", err)
 			continue
 		}
-		methods = append(methods, gossh.PublicKeys(signer))
+		clog.Debug("loaded key", "path", keyPath, "type", signer.PublicKey().Type(), "fingerprint", gossh.FingerprintSHA256(signer.PublicKey()))
+		signers = append(signers, signer)
 	}
 
-	if len(methods) == 0 {
+	if len(signers) == 0 {
 		return nil, fmt.Errorf("no auth methods available for host %s", host.Name)
 	}
-	return methods, nil
+	clog.Debug("auth signers ready", "host", host.Name, "count", len(signers))
+	return []gossh.AuthMethod{gossh.PublicKeys(signers...)}, nil
 }
 
 func loadKey(path string, host config.Host) (gossh.Signer, error) {
@@ -252,4 +291,11 @@ func AddKnownHost(hostname string, remote net.Addr, key gossh.PublicKey) error {
 	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
 	_, err = fmt.Fprintln(f, line)
 	return err
+}
+
+func expandSSHPath(path, home string) string {
+	if len(path) >= 2 && path[:2] == "~/" {
+		return home + path[1:]
+	}
+	return path
 }

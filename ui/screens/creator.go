@@ -38,7 +38,7 @@ func (k creatorKeyMap) FullHelp() [][]key.Binding {
 
 var defaultCreatorKeys = creatorKeyMap{
 	Next:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next/confirm")),
-	Toggle: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "select host")),
+	Toggle: key.NewBinding(key.WithKeys(" ", "space"), key.WithHelp("space", "select host")),
 	Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 	Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 	Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
@@ -207,10 +207,11 @@ func (m CreatorModel) save() tea.Cmd {
 		for i, e := range m.hosts {
 			if m.selected[i] {
 				hosts = append(hosts, config.Host{
-					Name:     e.Alias,
-					Hostname: e.Hostname,
-					User:     e.User,
-					Port:     e.Port,
+					Name:          e.Alias,
+					Hostname:      e.Hostname,
+					User:          e.User,
+					Port:          e.Port,
+					IdentityFiles: e.IdentityFiles,
 				})
 			}
 		}

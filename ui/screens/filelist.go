@@ -124,6 +124,7 @@ type FileListModel struct {
 	cancel     context.CancelFunc
 	errMsg     string
 	keyPrompt  unknownKeyPrompt
+	ready      bool
 }
 
 func NewFileListModel(proj config.Project) FileListModel {
@@ -145,12 +146,16 @@ func NewFileListModel(proj config.Project) FileListModel {
 		help:       help.New(),
 		ctx:        ctx,
 		cancel:     cancel,
+		ready:      true,
 	}
 }
 
 func (m *FileListModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	if !m.ready {
+		return
+	}
 	m.help.SetWidth(w)
 	footerH := 1
 	if m.help.ShowAll {

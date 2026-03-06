@@ -3,12 +3,14 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -22,17 +24,137 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// ─── In-process SSH server ────────────────────────────────────────────────────
+// ─── ECDSA testKey (for connect-only tests) ───────────────────────────────────
 
-type testSSHServer struct {
+type testKey struct {
+	raw    *ecdsa.PrivateKey
+	signer gossh.Signer
+	pub    gossh.PublicKey
+}
+
+func newTestKey(t *testing.T) testKey {
+	t.Helper()
+	raw, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := gossh.NewSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	return testKey{raw: raw, signer: signer, pub: signer.PublicKey()}
+}
+
+func (k testKey) writeToFile(t *testing.T, path string) {
+	t.Helper()
+	block, err := gossh.MarshalPrivateKey(k.raw, "")
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	data := pem.EncodeToMemory(block)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+}
+
+// ─── Simple (connect-only) SSH server ─────────────────────────────────────────
+
+// startSSHServerWithLog starts an in-process SSH server accepting authorizedKey.
+// onOffered is called with each offered key fingerprint (may be nil).
+func startSSHServerWithLog(t *testing.T, authorizedKey gossh.PublicKey, onOffered func(string)) (addr string, addToKnownHosts func(khPath string)) {
+	t.Helper()
+
+	hostKey := newTestKey(t)
+
+	serverCfg := &gossh.ServerConfig{
+		PublicKeyCallback: func(_ gossh.ConnMetadata, offered gossh.PublicKey) (*gossh.Permissions, error) {
+			fp := gossh.FingerprintSHA256(offered)
+			if onOffered != nil {
+				onOffered(fp)
+			}
+			if fp == gossh.FingerprintSHA256(authorizedKey) {
+				return &gossh.Permissions{}, nil
+			}
+			return nil, fmt.Errorf("key not authorized: %s", fp)
+		},
+	}
+	serverCfg.AddHostKey(hostKey.signer)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { l.Close() })
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				sc, chans, reqs, err := gossh.NewServerConn(c, serverCfg)
+				if err != nil {
+					return
+				}
+				go gossh.DiscardRequests(reqs)
+				for ch := range chans {
+					ch.Reject(gossh.UnknownChannelType, "not supported")
+				}
+				sc.Close()
+			}(conn)
+		}
+	}()
+
+	addr = l.Addr().String()
+	addToKnownHosts = func(khPath string) {
+		f, err := os.OpenFile(khPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			t.Fatalf("open known_hosts: %v", err)
+		}
+		defer f.Close()
+		fmt.Fprintln(f, knownhosts.Line([]string{addr}, hostKey.pub))
+	}
+	return addr, addToKnownHosts
+}
+
+// startSSHServer starts an in-process SSH server accepting authorizedKey.
+func startSSHServer(t *testing.T, authorizedKey gossh.PublicKey) (addr string, addToKnownHosts func(khPath string)) {
+	return startSSHServerWithLog(t, authorizedKey, nil)
+}
+
+// testHost builds a config.Host from an SSH server address and key path.
+func testHost(addr, keyPath string) config.Host {
+	h, portStr, _ := net.SplitHostPort(addr)
+	p := 22
+	fmt.Sscanf(portStr, "%d", &p)
+	return config.Host{
+		Name:          "test-host",
+		Hostname:      h,
+		User:          "testuser",
+		Port:          p,
+		IdentityFiles: []string{keyPath},
+	}
+}
+
+// withKnownHosts overrides the known_hosts path for the duration of the test.
+func withKnownHosts(t *testing.T, khPath string) {
+	t.Helper()
+	knownHostsPathOverride = khPath
+	t.Cleanup(func() { knownHostsPathOverride = "" })
+}
+
+// ─── Exec-capable SSH server (for tail/grep tests) ────────────────────────────
+
+type execSSHServer struct {
 	addr       string
 	listener   net.Listener
 	hostSigner gossh.Signer
 }
 
-// newTestSSHServer starts an in-process SSH server that accepts clientPub as the
-// only authorized public key, and executes commands via sh -c locally.
-func newTestSSHServer(t *testing.T, clientPub gossh.PublicKey) *testSSHServer {
+// newExecSSHServer starts an in-process SSH server that accepts clientPub and
+// executes commands via sh -c locally.
+func newExecSSHServer(t *testing.T, clientPub gossh.PublicKey) *execSSHServer {
 	t.Helper()
 
 	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
@@ -58,13 +180,13 @@ func newTestSSHServer(t *testing.T, clientPub gossh.PublicKey) *testSSHServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	s := &testSSHServer{addr: ln.Addr().String(), listener: ln, hostSigner: hostSigner}
+	s := &execSSHServer{addr: ln.Addr().String(), listener: ln, hostSigner: hostSigner}
 	go s.serve(ln, cfg)
 	t.Cleanup(func() { ln.Close() })
 	return s
 }
 
-func (s *testSSHServer) serve(ln net.Listener, cfg *gossh.ServerConfig) {
+func (s *execSSHServer) serve(ln net.Listener, cfg *gossh.ServerConfig) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -74,7 +196,7 @@ func (s *testSSHServer) serve(ln net.Listener, cfg *gossh.ServerConfig) {
 	}
 }
 
-func (s *testSSHServer) handleConn(conn net.Conn, cfg *gossh.ServerConfig) {
+func (s *execSSHServer) handleConn(conn net.Conn, cfg *gossh.ServerConfig) {
 	sshConn, chans, reqs, err := gossh.NewServerConn(conn, cfg)
 	if err != nil {
 		return
@@ -94,7 +216,7 @@ func (s *testSSHServer) handleConn(conn net.Conn, cfg *gossh.ServerConfig) {
 	}
 }
 
-func (s *testSSHServer) handleSession(ch gossh.Channel, requests <-chan *gossh.Request) {
+func (s *execSSHServer) handleSession(ch gossh.Channel, requests <-chan *gossh.Request) {
 	defer ch.Close()
 	for req := range requests {
 		if req.Type != "exec" {
@@ -103,7 +225,6 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, requests <-chan *gossh.R
 			}
 			continue
 		}
-		// exec payload: uint32 big-endian length + command bytes.
 		if len(req.Payload) < 4 {
 			_ = req.Reply(false, nil)
 			continue
@@ -136,13 +257,13 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, requests <-chan *gossh.R
 	}
 }
 
-// ─── Test environment setup ───────────────────────────────────────────────────
+// ─── Exec SSH test environment ────────────────────────────────────────────────
 
-// testSSHEnv sets up a temporary $HOME containing:
+// testSSHEnv sets up a temporary $HOME with:
 //   - .ssh/id_ed25519  (generated client private key, mode 0600)
 //   - .ssh/known_hosts (the test server's host key)
 //
-// It starts a test SSH server and returns the config.Host pointing to it.
+// It starts an exec-capable test SSH server and returns the config.Host.
 func testSSHEnv(t *testing.T) config.Host {
 	t.Helper()
 
@@ -159,7 +280,6 @@ func testSSHEnv(t *testing.T) config.Host {
 		t.Fatalf("generate client key: %v", err)
 	}
 
-	// Serialize the private key to OpenSSH PEM (using x/crypto/ssh.MarshalPrivateKey).
 	privPEMBlock, err := gossh.MarshalPrivateKey(clientPriv, "")
 	if err != nil {
 		t.Fatalf("marshal private key: %v", err)
@@ -169,14 +289,12 @@ func testSSHEnv(t *testing.T) config.Host {
 		t.Fatalf("write private key: %v", err)
 	}
 
-	// Start the test server, authorizing the generated client key.
 	sshClientPub, err := gossh.NewPublicKey(clientPub)
 	if err != nil {
 		t.Fatalf("new public key: %v", err)
 	}
-	srv := newTestSSHServer(t, sshClientPub)
+	srv := newExecSSHServer(t, sshClientPub)
 
-	// Parse host/port from the server's listen address.
 	h, portStr, err := net.SplitHostPort(srv.addr)
 	if err != nil {
 		t.Fatalf("split addr: %v", err)
@@ -186,7 +304,6 @@ func testSSHEnv(t *testing.T) config.Host {
 		t.Fatalf("parse port: %v", err)
 	}
 
-	// Write known_hosts so Connect() trusts the server's host key.
 	khLine := knownhosts.Line(
 		[]string{knownhosts.Normalize(srv.addr)},
 		srv.hostSigner.PublicKey(),
@@ -211,7 +328,107 @@ func receiveWithTimeout(t *testing.T, ch chan LogLineMsg, timeout time.Duration)
 	}
 }
 
-// ─── Connection tests ─────────────────────────────────────────────────────────
+// ─── Key round-trip and connect-only tests ────────────────────────────────────
+
+func TestKeyRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	original := newTestKey(t)
+	keyPath := filepath.Join(dir, "id_ecdsa")
+	original.writeToFile(t, keyPath)
+
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := gossh.ParsePrivateKey(data)
+	if err != nil {
+		t.Fatalf("ParsePrivateKey: %v", err)
+	}
+
+	origFP := gossh.FingerprintSHA256(original.pub)
+	parsedFP := gossh.FingerprintSHA256(parsed.PublicKey())
+	t.Logf("original fingerprint: %s", origFP)
+	t.Logf("parsed   fingerprint: %s", parsedFP)
+	if origFP != parsedFP {
+		t.Errorf("fingerprint mismatch after PEM round-trip")
+	}
+}
+
+func TestConnect_AuthWithKeyFile(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	dir := t.TempDir()
+	clientKey := newTestKey(t)
+	keyPath := filepath.Join(dir, "id_ecdsa")
+	clientKey.writeToFile(t, keyPath)
+
+	var serverSawFP string
+	addr, addToKnownHosts := startSSHServerWithLog(t, clientKey.pub, func(fp string) {
+		serverSawFP = fp
+	})
+	khPath := filepath.Join(dir, "known_hosts")
+	addToKnownHosts(khPath)
+	withKnownHosts(t, khPath)
+
+	client, err := Connect(context.Background(), testHost(addr, keyPath))
+	t.Logf("server saw fingerprint: %s", serverSawFP)
+	t.Logf("expected fingerprint:   %s", gossh.FingerprintSHA256(clientKey.pub))
+	if err != nil {
+		t.Fatalf("Connect() failed: %v", err)
+	}
+	client.Close()
+}
+
+func TestConnect_WrongKey_FailsAuth(t *testing.T) {
+	dir := t.TempDir()
+	authorizedKey := newTestKey(t)
+	wrongKey := newTestKey(t)
+	keyPath := filepath.Join(dir, "id_ecdsa")
+	wrongKey.writeToFile(t, keyPath)
+
+	addr, addToKnownHosts := startSSHServer(t, authorizedKey.pub)
+	khPath := filepath.Join(dir, "known_hosts")
+	addToKnownHosts(khPath)
+	withKnownHosts(t, khPath)
+
+	_, err := Connect(context.Background(), testHost(addr, keyPath))
+	if err == nil {
+		t.Fatal("expected auth failure, got nil")
+	}
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *ConnectError, got %T: %v", err, err)
+	}
+	if ce.Reason != FailAuthFailed {
+		t.Errorf("Reason = %v, want FailAuthFailed", ce.Reason)
+	}
+}
+
+func TestConnect_UnknownHost(t *testing.T) {
+	dir := t.TempDir()
+	clientKey := newTestKey(t)
+	keyPath := filepath.Join(dir, "id_ecdsa")
+	clientKey.writeToFile(t, keyPath)
+
+	addr, _ := startSSHServer(t, clientKey.pub)
+	khPath := filepath.Join(dir, "known_hosts")
+	os.WriteFile(khPath, nil, 0o600)
+	withKnownHosts(t, khPath)
+
+	_, err := Connect(context.Background(), testHost(addr, keyPath))
+	if err == nil {
+		t.Fatal("expected unknown host error, got nil")
+	}
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *ConnectError, got %T: %v", err, err)
+	}
+	if ce.Reason != FailHostKeyUnknown {
+		t.Errorf("Reason = %v, want FailHostKeyUnknown", ce.Reason)
+	}
+}
+
+// ─── Integration: connect success / host-key / auth-failed ───────────────────
 
 func TestIntegration_Connect_Success(t *testing.T) {
 	host := testSSHEnv(t)
@@ -231,7 +448,6 @@ func TestIntegration_Connect_HostKeyUnknown(t *testing.T) {
 	host := testSSHEnv(t)
 	home, _ := os.UserHomeDir()
 
-	// Remove the known_hosts file so the server's key is unknown.
 	_ = os.Remove(filepath.Join(home, ".ssh", "known_hosts"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -256,15 +472,14 @@ func TestIntegration_Connect_AuthFailed(t *testing.T) {
 	sshDir := filepath.Join(home, ".ssh")
 	_ = os.MkdirAll(sshDir, 0o700)
 
-	// Generate a client key pair, but do NOT authorize it on the server.
 	_, clientPriv, _ := ed25519.GenerateKey(rand.Reader)
 	privPEMBlock, _ := gossh.MarshalPrivateKey(clientPriv, "")
 	_ = os.WriteFile(filepath.Join(sshDir, "id_ed25519"), pem.EncodeToMemory(privPEMBlock), 0o600)
 
-	// The server only accepts a *different* key.
-	differentPub, _, _ := ed25519.GenerateKey(rand.Reader) // pub, priv, err — note: pub is first
+	// Server only accepts a different key.
+	differentPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	differentSSHPub, _ := gossh.NewPublicKey(differentPub)
-	srv := newTestSSHServer(t, differentSSHPub)
+	srv := newExecSSHServer(t, differentSSHPub)
 
 	h, portStr, _ := net.SplitHostPort(srv.addr)
 	port := 0
@@ -295,12 +510,9 @@ func TestIntegration_AddKnownHost_ThenConnect(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	sshDir := filepath.Join(home, ".ssh")
 
-	// Remove known_hosts so Connect fails on the first attempt.
 	khPath := filepath.Join(sshDir, "known_hosts")
 	_ = os.Remove(khPath)
 
-	// Use a low-level dial to capture the server's host key without
-	// triggering the real Connect() (which would return a ConnectError).
 	addr := fmt.Sprintf("%s:%d", host.Hostname, host.Port)
 	var capturedKey gossh.PublicKey
 	captureCfg := &gossh.ClientConfig{
@@ -317,15 +529,11 @@ func TestIntegration_AddKnownHost_ThenConnect(t *testing.T) {
 		t.Fatal("failed to capture server host key")
 	}
 
-	// Add the captured key to known_hosts.
-	// Pass the full "host:port" addr so knownhosts.Normalize stores "[host]:port"
-	// for non-standard ports, matching what Connect()'s HostKeyCallback checks.
 	tcpAddr, _ := net.ResolveTCPAddr("tcp", addr)
 	if err := AddKnownHost(addr, tcpAddr, capturedKey); err != nil {
 		t.Fatalf("AddKnownHost: %v", err)
 	}
 
-	// Connect should now succeed.
 	ctx := context.Background()
 	client, err := Connect(ctx, host)
 	if err != nil {
@@ -354,9 +562,8 @@ func TestIntegration_StartTail_ReceivesLines(t *testing.T) {
 
 	ch := make(chan LogLineMsg, 10)
 	StartTail(ctx, client, logFile, ch)
-	time.Sleep(300 * time.Millisecond) // give tail time to start
+	time.Sleep(300 * time.Millisecond)
 
-	// Append lines to the log file.
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("open log file: %v", err)
@@ -367,7 +574,6 @@ func TestIntegration_StartTail_ReceivesLines(t *testing.T) {
 	}
 	f.Close()
 
-	// Verify all 3 lines arrive with correct content and host.
 	for i, wantLine := range want {
 		msg := receiveWithTimeout(t, ch, 10*time.Second)
 		if msg.Raw != wantLine {
@@ -399,17 +605,15 @@ func TestIntegration_StartTail_ContextCancel(t *testing.T) {
 	StartTail(ctx, client, logFile, ch)
 	time.Sleep(300 * time.Millisecond)
 
-	cancel() // stop the tail goroutine
+	cancel()
 	time.Sleep(500 * time.Millisecond)
 
-	// Write a line after cancellation — it should NOT arrive on ch.
 	f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_WRONLY, 0)
 	fmt.Fprintln(f, "after cancel")
 	f.Close()
 
 	select {
 	case msg := <-ch:
-		// Allow one stray message due to timing, but log it.
 		t.Logf("received after cancel (timing race, non-fatal): %q", msg.Raw)
 	case <-time.After(2 * time.Second):
 		// Expected: no message received.
@@ -577,21 +781,16 @@ func TestIntegration_StartGrep_RegexPattern(t *testing.T) {
 
 // ─── Round-trip test ──────────────────────────────────────────────────────────
 
-// TestIntegration_RoundTrip exercises the full pipeline:
-// SSH config parsing → Connect → StartTail → receive lines.
 func TestIntegration_RoundTrip(t *testing.T) {
 	host := testSSHEnv(t)
 	home, _ := os.UserHomeDir()
 
-	// Write an SSH config entry for the test server. This exercises the bug fix
-	// where gosshconfig.Get (global) was used instead of cfg.Get (decoded config).
 	sshCfg := fmt.Sprintf("Host test-server\n    Hostname %s\n    Port %d\n", host.Hostname, host.Port)
 	cfgPath := filepath.Join(home, ".ssh", "config")
 	if err := os.WriteFile(cfgPath, []byte(sshCfg), 0o600); err != nil {
 		t.Fatalf("write ssh config: %v", err)
 	}
 
-	// Connect and tail a log file.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -617,6 +816,3 @@ func TestIntegration_RoundTrip(t *testing.T) {
 		t.Errorf("unexpected message: %q", msg.Raw)
 	}
 }
-
-// Ensure io is referenced (used by RoundTrip helper).
-var _ = io.EOF
