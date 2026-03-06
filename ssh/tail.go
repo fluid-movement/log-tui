@@ -35,7 +35,7 @@ type ReconnectMsg struct {
 	Attempt int
 }
 
-const tailCmdFmt = "tail -F -n 0 %s"
+const tailCmdFmt = "tail -F -n 10 %s"
 const grepCmdFmt = "grep -n -E %q %s"
 
 // ListenForLog returns a Cmd that reads one LogLineMsg from ch.

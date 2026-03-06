@@ -130,8 +130,7 @@ type FileListModel struct {
 func NewFileListModel(proj config.Project) FileListModel {
 	delegate := list.NewDefaultDelegate()
 	l := list.New(nil, delegate, 0, 0)
-	l.Title = proj.Name + " — Files"
-	l.Styles.Title = styles.TitleStyle
+	l.SetShowTitle(false)
 	l.SetShowHelp(false)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,7 +160,10 @@ func (m *FileListModel) SetSize(w, h int) {
 	if m.help.ShowAll {
 		footerH = 4
 	}
-	m.list.SetSize(w, h-footerH-3) // extra space for status line
+	// header = title(1) + blank(1) + host status lines + blank(1) = len(hosts)+3
+	// separator "\n" after list.View() = 1
+	headerH := len(m.project.Hosts) + 3
+	m.list.SetSize(w, h-headerH-footerH-1)
 }
 
 func (m FileListModel) Init() tea.Cmd {

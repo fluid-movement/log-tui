@@ -195,8 +195,13 @@ func (m GridModel) helpBarHeight() int {
 }
 
 func gridDimensions(n, termW, termH, helpBarH int) (cols, rows, cardW, cardH int) {
+	// Reserve 1 line for the "\n" separator between the grid and the footer.
+	effective := termH - helpBarH - 1
+	if effective < 1 {
+		effective = 1
+	}
 	if n == 0 {
-		return 1, 1, termW, termH - helpBarH
+		return 1, 1, termW, effective
 	}
 	cols = int(math.Ceil(math.Sqrt(float64(n))))
 	if cols == 0 {
@@ -207,7 +212,7 @@ func gridDimensions(n, termW, termH, helpBarH int) (cols, rows, cardW, cardH int
 		rows = 1
 	}
 	cardW = termW / cols
-	cardH = (termH - helpBarH) / rows
+	cardH = effective / rows
 	return
 }
 
