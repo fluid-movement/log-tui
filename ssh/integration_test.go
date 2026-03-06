@@ -313,7 +313,12 @@ func testSSHEnv(t *testing.T) config.Host {
 		t.Fatalf("write known_hosts: %v", err)
 	}
 
-	return config.Host{Name: "test-server", Hostname: h, Port: port}
+	return config.Host{
+		Name:          "test-server",
+		Hostname:      h,
+		Port:          port,
+		IdentityFiles: []string{filepath.Join(sshDir, "id_ed25519")},
+	}
 }
 
 // receiveWithTimeout reads one LogLineMsg from ch within timeout, or calls t.Fatalf.
