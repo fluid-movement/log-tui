@@ -428,3 +428,10 @@ func (m FileListModel) View() string {
 	}
 	return b.String()
 }
+
+// Width / Height expose the current terminal dimensions for testing.
+func (m FileListModel) Width() int  { return m.width }
+func (m FileListModel) Height() int { return m.height }
+
+// ProjectName returns the project name for testing.
+func (m FileListModel) ProjectName() string { return m.project.Name }

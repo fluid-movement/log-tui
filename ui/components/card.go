@@ -288,6 +288,9 @@ func (c *ServerCard) FilterInput() *textinput.Model { return &c.filterIn }
 // Filtering returns whether filter mode is active.
 func (c *ServerCard) Filtering() bool { return c.filtering }
 
+// Lines returns the buffered log lines (read-only view for testing/inspection).
+func (c *ServerCard) Lines() []parser.ParsedLine { return c.lines }
+
 // SetGlobalFilter updates the global filter and rebuilds the viewport.
 func (c *ServerCard) SetGlobalFilter(f FilterState) {
 	c.globalFilter = f

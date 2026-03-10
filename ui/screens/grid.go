@@ -318,7 +318,53 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
+	// Search mode input handling — must come before the main switch so that Esc
+	// exits search mode rather than triggering the Back binding.
+	if m.mode == ModeSearch {
+		switch msg := msg.(type) {
+		case tea.KeyPressMsg:
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.mode = ModeTail
+				m.searchInput.Blur()
+				m.searchInput.Reset()
+				m.searchResults = make(map[string][]string)
+				m.updateKeyStates()
+				return m, tea.Batch(cmds...)
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				pattern := m.searchInput.Value()
+				if pattern != "" {
+					m.searchResults = make(map[string][]string)
+					// Cancel previous search contexts
+					for _, c := range m.searchCancels {
+						c()
+					}
+					m.searchCancels = nil
+					for _, client := range m.clients {
+						client := client
+						ch := make(chan gossh.LogLineMsg, 1024)
+						ctx, cancel := context.WithCancel(context.Background())
+						m.searchCancels = append(m.searchCancels, cancel)
+						gossh.StartGrep(ctx, client, pattern, m.filePath, ch)
+						cmds = append(cmds, collectSearchResults(client.Host.Name, ch))
+					}
+				}
+				return m, tea.Batch(cmds...)
+
+			default:
+				var cmd tea.Cmd
+				m.searchInput, cmd = m.searchInput.Update(msg)
+				cmds = append(cmds, cmd)
+				return m, tea.Batch(cmds...)
+			}
+		}
+	}
+
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.SetSize(msg.Width, msg.Height)
+
 	case gossh.LogLineMsg:
 		// Find which card this belongs to.
 		for i, card := range m.cards {
@@ -497,48 +543,6 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 		}
 	}
 
-	// Search mode input handling
-	if m.mode == ModeSearch {
-		switch msg := msg.(type) {
-		case tea.KeyPressMsg:
-			switch {
-			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
-				m.mode = ModeTail
-				m.searchInput.Blur()
-				m.searchInput.Reset()
-				m.searchResults = make(map[string][]string)
-				m.updateKeyStates()
-				return m, tea.Batch(cmds...)
-
-			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
-				pattern := m.searchInput.Value()
-				if pattern != "" {
-					m.searchResults = make(map[string][]string)
-					// Cancel previous search contexts
-					for _, c := range m.searchCancels {
-						c()
-					}
-					m.searchCancels = nil
-					for _, client := range m.clients {
-						client := client
-						ch := make(chan gossh.LogLineMsg, 1024)
-						ctx, cancel := context.WithCancel(context.Background())
-						m.searchCancels = append(m.searchCancels, cancel)
-						gossh.StartGrep(ctx, client, pattern, m.filePath, ch)
-						cmds = append(cmds, collectSearchResults(client.Host.Name, ch))
-					}
-				}
-				return m, tea.Batch(cmds...)
-
-			default:
-				var cmd tea.Cmd
-				m.searchInput, cmd = m.searchInput.Update(msg)
-				cmds = append(cmds, cmd)
-				return m, tea.Batch(cmds...)
-			}
-		}
-	}
-
 	return m, tea.Batch(cmds...)
 }
 
@@ -632,3 +636,7 @@ func (m GridModel) renderGrid() string {
 
 	return grid + "\n" + footer
 }
+
+// Width / Height expose the current terminal dimensions for testing.
+func (m GridModel) Width() int  { return m.width }
+func (m GridModel) Height() int { return m.height }

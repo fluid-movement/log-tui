@@ -202,3 +202,7 @@ func (m ProjectsModel) View() string {
 
 	return m.list.View() + "\n" + footer
 }
+
+// Width / Height expose the current terminal dimensions for testing.
+func (m ProjectsModel) Width() int  { return m.width }
+func (m ProjectsModel) Height() int { return m.height }

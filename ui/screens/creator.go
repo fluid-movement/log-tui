@@ -280,3 +280,7 @@ func (m CreatorModel) View() string {
 	b.WriteString("\n" + m.help.View(m.keys))
 	return b.String()
 }
+
+// Width / Height expose the current terminal dimensions for testing.
+func (m CreatorModel) Width() int  { return m.width }
+func (m CreatorModel) Height() int { return m.height }
