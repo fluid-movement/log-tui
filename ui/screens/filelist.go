@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"sort"
 	"strings"
 
@@ -338,7 +339,7 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 						clients = append(clients, hs.client)
 					}
 				}
-				filePath := item.name
+				filePath := path.Join(m.project.LogPath, item.name)
 				proj := m.project
 				return m, func() tea.Msg {
 					return SwitchMsg{

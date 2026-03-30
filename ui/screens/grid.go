@@ -234,6 +234,14 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 
 	// Detail overlay intercepts all input when visible.
 	if m.detail.Visible {
+		if logMsg, ok := msg.(gossh.LogLineMsg); ok {
+			for i, client := range m.clients {
+				if client.Host.Name == logMsg.Host {
+					cmds = append(cmds, gossh.ListenForLog(m.logChans[i]))
+					break
+				}
+			}
+		}
 		if cmd := m.detail.Update(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
