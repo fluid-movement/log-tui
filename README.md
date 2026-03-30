@@ -1,4 +1,4 @@
-# logviewer
+# log tui
 
 A terminal UI for tailing and searching log files across multiple remote servers simultaneously, over SSH.
 
@@ -21,7 +21,7 @@ f filter  F global filter  s search  p pause  m marker  ?  help  q quit
 Requires Go 1.23+.
 
 ```bash
-git clone https://github.com/yourname/logviewer
+git clone https://github.com/fluid-movement/log-tui
 cd logviewer
 go build -o logviewer .
 # optionally move to your PATH
